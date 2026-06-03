@@ -1,8 +1,3 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// TMDB (The Movie Database) service
-// Get your free API key at: https://www.themoviedb.org/settings/api
-// Replace the string below with your key, then restart the dev server.
-// ─────────────────────────────────────────────────────────────────────────────
 const TMDB_API_KEY: string = "d77f70de4830809e884873988bbae61c";
 
 const BASE = "https://api.themoviedb.org/3";
