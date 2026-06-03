@@ -1,7 +1,3 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// All native calls are deferred until after the React Native bridge is ready.
-// Do NOT call any Notifications.* or Platform.* at the module top level.
-// ─────────────────────────────────────────────────────────────────────────────
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
 const PREFS_KEY    = "@notifications/prefs";
