@@ -1,6 +1,7 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { api } from "@/services/api";
 
-const PREFS_KEY    = "@notifications/prefs";
+// Only kept for the local expo-notifications schedule ID (not user data)
 const DAILY_ID_KEY = "@notifications/daily_id";
 
 export interface NotificationPrefs {
@@ -21,15 +22,15 @@ export const DEFAULT_PREFS: NotificationPrefs = {
 
 export async function getPrefs(): Promise<NotificationPrefs> {
   try {
-    const raw = await AsyncStorage.getItem(PREFS_KEY);
-    return raw ? { ...DEFAULT_PREFS, ...JSON.parse(raw) } : DEFAULT_PREFS;
+    const prefs = await api.getPrefs();
+    return { ...DEFAULT_PREFS, ...prefs };
   } catch {
     return DEFAULT_PREFS;
   }
 }
 
 export async function savePrefs(prefs: NotificationPrefs): Promise<void> {
-  await AsyncStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+  await api.patchPrefs(prefs);
 }
 
 // ── Lazy setup: only loads expo-notifications after the bridge is ready ────────

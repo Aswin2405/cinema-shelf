@@ -7,7 +7,7 @@ import React, {
   useMemo,
   ReactNode,
 } from "react";
-import AsyncStorage from "@react-native-async-storage/async-storage";
+import { Alert } from "react-native";
 import { Movie, SubMovie } from "@/constants/data";
 import { getCategoryPosterColor } from "@/constants/categoryColors";
 import {
@@ -15,18 +15,7 @@ import {
   notifyMovieWatched,
   notifySeriesCompleted,
 } from "@/services/notifications";
-const STORAGE_TO_WATCH = "@watchlist/toWatch";
-const STORAGE_WATCHED = "@watchlist/watched";
-const STORAGE_SEEDED = "@watchlist/seeded_v5";
-
-function migrate(raw: any[]): Movie[] {
-  return raw.map((m) => ({
-    ...m,
-    category: m.category || (m as any).genre || "General",
-    watchOn: m.watchOn ?? "",
-    notes: m.notes ?? "",
-  }));
-}
+import { api } from "@/services/api";
 
 interface WatchlistContextType {
   toWatch: Movie[];
@@ -66,57 +55,42 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let cancelled = false;
-    const init = async () => {
-      const [tw, w, seeded] = await Promise.all([
-        AsyncStorage.getItem(STORAGE_TO_WATCH),
-        AsyncStorage.getItem(STORAGE_WATCHED),
-        AsyncStorage.getItem(STORAGE_SEEDED),
-      ]);
-      if (cancelled) return;
 
-      let toWatchData: Movie[] = tw ? migrate(JSON.parse(tw)) : [];
-      let watchedData: Movie[] = w ? migrate(JSON.parse(w)) : [];
-
-      if (!seeded) {
-        const { SEED_MOVIES } = await import("@/constants/seedData");
-        if (cancelled) return;
-        const existingIds = new Set([...toWatchData, ...watchedData].map((m) => m.id));
-        const fresh = SEED_MOVIES.filter((m) => !existingIds.has(m.id));
-        toWatchData = [...fresh, ...toWatchData];
-        const snapshot = toWatchData;
-        setTimeout(() => {
-          AsyncStorage.setItem(STORAGE_TO_WATCH, JSON.stringify(snapshot)).catch(() => {});
-          AsyncStorage.setItem(STORAGE_SEEDED, "1").catch(() => {});
-        }, 0);
+    // Free-tier hosts spin the backend down when idle — a cold start can take
+    // 30-60s. If the first request hasn't resolved shortly, tell the user why.
+    const wakeupTimer = setTimeout(() => {
+      if (!cancelled) {
+        Alert.alert(
+          "Loading app",
+          "Please wait a moment — the server is waking up. This can take up to a minute."
+        );
       }
+    }, 2500);
 
-      setToWatch(toWatchData);
-      setWatched(watchedData);
-      setLoaded(true);
+    const init = async () => {
+      const backendMovies = await api.getMovies();
+      if (cancelled) return;
+      setToWatch(backendMovies.filter((m) => !m.watched));
+      setWatched(backendMovies.filter((m) => m.watched));
     };
-    init().catch(() => setLoaded(true));
-    return () => { cancelled = true; };
+
+    init()
+      .catch(() => {
+        // Backend unreachable — leave lists empty until it's back
+      })
+      .finally(() => {
+        clearTimeout(wakeupTimer);
+        if (!cancelled) setLoaded(true);
+      });
+    return () => { cancelled = true; clearTimeout(wakeupTimer); };
   }, []);
 
-  useEffect(() => {
-    if (!loaded) return;
-    const t = setTimeout(() => {
-      AsyncStorage.setItem(STORAGE_TO_WATCH, JSON.stringify(toWatch)).catch(() => {});
-    }, 300);
-    return () => clearTimeout(t);
-  }, [toWatch, loaded]);
-
-  useEffect(() => {
-    if (!loaded) return;
-    const t = setTimeout(() => {
-      AsyncStorage.setItem(STORAGE_WATCHED, JSON.stringify(watched)).catch(() => {});
-    }, 300);
-    return () => clearTimeout(t);
-  }, [watched, loaded]);
+  // ── Mutations: optimistic local update + background API sync ─────────────────
 
   const updateMoviePoster = useCallback((id: string, url: string) => {
     setToWatch((prev) => patch(prev, id, (m) => ({ ...m, posterUrl: url })));
     setWatched((prev) => patch(prev, id, (m) => ({ ...m, posterUrl: url })));
+    api.patchMovie(id, { posterUrl: url }).catch(() => {});
   }, []);
 
   const addMovie = useCallback((movie: Movie) => {
@@ -125,6 +99,7 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
       notifyMovieAdded(movie.title);
       return [{ ...movie, watched: false }, ...prev];
     });
+    api.createMovie({ ...movie, watched: false }).catch(() => {});
   }, []);
 
   const removeMovie = useCallback((id: string) => {
@@ -134,6 +109,7 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
       return prev.filter((m) => m.id !== id);
     });
     setWatched((prev) => prev.filter((m) => m.id !== id));
+    api.deleteMovie(id).catch(() => {});
   }, []);
 
   const markWatched = useCallback((id: string) => {
@@ -144,6 +120,7 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
       setWatched((w) => [{ ...movie, watched: true }, ...w]);
       return prev.filter((m) => m.id !== id);
     });
+    api.markWatched(id).catch(() => {});
   }, []);
 
   const unmarkWatched = useCallback((id: string) => {
@@ -153,19 +130,23 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
       setToWatch((w) => [{ ...movie, watched: false }, ...w]);
       return prev.filter((m) => m.id !== id);
     });
+    api.unmarkWatched(id).catch(() => {});
   }, []);
 
   const markCurrentlyWatching = useCallback((id: string) => {
     setToWatch((prev) => patch(prev, id, (m) => ({ ...m, currentlyWatching: true })));
+    api.markWatching(id).catch(() => {});
   }, []);
 
   const unmarkCurrentlyWatching = useCallback((id: string) => {
     setToWatch((prev) => patch(prev, id, (m) => ({ ...m, currentlyWatching: false })));
+    api.unmarkWatching(id).catch(() => {});
   }, []);
 
   const undoRemove = useCallback(() => {
     if (!lastRemoved) return;
     setToWatch((prev) => [lastRemoved, ...prev]);
+    api.createMovie(lastRemoved).catch(() => {});
     setLastRemoved(null);
   }, [lastRemoved]);
 
@@ -180,17 +161,16 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
       id: string,
       updates: Partial<Pick<Movie, "title" | "category" | "notes" | "watchOn" | "language">>
     ) => {
+      // Compute posterColor eagerly so both state and API receive the same value
+      const patchData: Partial<Movie> = { ...updates };
+      if (updates.category) {
+        patchData.posterColor = getCategoryPosterColor(updates.category);
+      }
       const apply = (prev: Movie[]) =>
-        prev.map((m) => {
-          if (m.id !== id) return m;
-          const next = { ...m, ...updates };
-          if (updates.category && updates.category !== m.category) {
-            next.posterColor = getCategoryPosterColor(updates.category);
-          }
-          return next;
-        });
+        prev.map((m) => (m.id !== id ? m : { ...m, ...patchData }));
       setToWatch(apply);
       setWatched(apply);
+      api.patchMovie(id, patchData).catch(() => {});
     },
     []
   );
@@ -202,6 +182,7 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
     });
     setToWatch((prev) => patch(prev, movieId, update));
     setWatched((prev) => patch(prev, movieId, update));
+    api.addSubMovie(movieId, sub).catch(() => {});
   }, []);
 
   const removeSubMovie = useCallback((movieId: string, subId: string) => {
@@ -211,6 +192,7 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
     });
     setToWatch((prev) => patch(prev, movieId, update));
     setWatched((prev) => patch(prev, movieId, update));
+    api.removeSubMovie(movieId, subId).catch(() => {});
   }, []);
 
   const updateSubMovie = useCallback(
@@ -223,6 +205,7 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
       });
       setToWatch((prev) => patch(prev, movieId, update));
       setWatched((prev) => patch(prev, movieId, update));
+      api.updateSubMovie(movieId, subId, { title }).catch(() => {});
     },
     []
   );
@@ -249,6 +232,7 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
         return patch(prev, movieId, applyToggle);
       });
       setWatched((prev) => patch(prev, movieId, applyToggle));
+      api.toggleSubMovie(movieId, subId).catch(() => {});
     },
     []
   );
