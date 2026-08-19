@@ -7,7 +7,6 @@ import React, {
   useMemo,
   ReactNode,
 } from "react";
-import { Alert } from "react-native";
 import { Movie, SubMovie } from "@/constants/data";
 import { getCategoryPosterColor } from "@/constants/categoryColors";
 import {
@@ -21,6 +20,11 @@ interface WatchlistContextType {
   toWatch: Movie[];
   watched: Movie[];
   loading: boolean;
+  /** The first load is taking long enough that the backend is probably cold. */
+  wakingUp: boolean;
+  /** The first load failed outright. */
+  loadFailed: boolean;
+  retryLoad: () => void;
   updateMoviePoster: (id: string, url: string) => void;
   addMovie: (movie: Movie) => void;
   removeMovie: (id: string) => void;
@@ -45,6 +49,9 @@ interface WatchlistContextType {
 
 const WatchlistContext = createContext<WatchlistContextType | null>(null);
 
+// How long the first request may take before we explain the delay
+const WAKE_NOTICE_DELAY_MS = 2500;
+
 function patch(movies: Movie[], id: string, fn: (m: Movie) => Movie): Movie[] {
   return movies.map((m) => (m.id === id ? fn(m) : m));
 }
@@ -54,37 +61,44 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
   const [watched, setWatched] = useState<Movie[]>([]);
   const [lastRemoved, setLastRemoved] = useState<Movie | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [wakingUp, setWakingUp] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
+    setLoadFailed(false);
 
     // Free-tier hosts spin the backend down when idle — a cold start can take
-    // 30-60s. If the first request hasn't resolved shortly, tell the user why.
+    // 30-60s. Past this point, say so rather than leaving a silent skeleton.
     const wakeupTimer = setTimeout(() => {
-      if (!cancelled) {
-        Alert.alert(
-          "Loading app",
-          "Please wait a moment — the server is waking up. This can take up to a minute."
-        );
-      }
-    }, 2500);
+      if (!cancelled) setWakingUp(true);
+    }, WAKE_NOTICE_DELAY_MS);
 
-    const init = async () => {
-      const backendMovies = await api.getMovies();
-      if (cancelled) return;
-      setToWatch(backendMovies.filter((m) => !m.watched));
-      setWatched(backendMovies.filter((m) => m.watched));
-    };
-
-    init()
+    api
+      .getMovies()
+      .then((backendMovies) => {
+        if (cancelled) return;
+        setToWatch(backendMovies.filter((m) => !m.watched));
+        setWatched(backendMovies.filter((m) => m.watched));
+        setLoaded(true);
+      })
       .catch(() => {
-        // Backend unreachable — leave lists empty until it's back
+        // Stay in the loading state and offer a retry — showing an empty
+        // watchlist would look like the data was lost.
+        if (!cancelled) setLoadFailed(true);
       })
       .finally(() => {
         clearTimeout(wakeupTimer);
-        if (!cancelled) setLoaded(true);
+        if (!cancelled) setWakingUp(false);
       });
+
     return () => { cancelled = true; clearTimeout(wakeupTimer); };
+  }, [attempt]);
+
+  const retryLoad = useCallback(() => {
+    setLoadFailed(false);
+    setAttempt((n) => n + 1);
   }, []);
 
   // ── Mutations: optimistic local update + background API sync ─────────────────
@@ -243,14 +257,16 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<WatchlistContextType>(
     () => ({
-      toWatch, watched, loading: !loaded, updateMoviePoster,
+      toWatch, watched, loading: !loaded, wakingUp, loadFailed, retryLoad,
+      updateMoviePoster,
       addMovie, removeMovie, markWatched, unmarkWatched,
       markCurrentlyWatching, unmarkCurrentlyWatching, undoRemove, lastRemoved,
       isInWatchlist, updateMovie, addSubMovie, removeSubMovie,
       toggleSubMovieWatched, updateSubMovie,
     }),
     [
-      toWatch, watched, loaded, updateMoviePoster,
+      toWatch, watched, loaded, wakingUp, loadFailed, retryLoad,
+      updateMoviePoster,
       addMovie, removeMovie, markWatched, unmarkWatched,
       markCurrentlyWatching, unmarkCurrentlyWatching, undoRemove, lastRemoved,
       isInWatchlist, updateMovie, addSubMovie, removeSubMovie,

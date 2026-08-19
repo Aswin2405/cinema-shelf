@@ -1,11 +1,13 @@
-import React, { useState, useMemo } from "react";
+import React, { Suspense, useCallback, useMemo, useRef, useState } from "react";
 import {
   View,
   Text,
   StyleSheet,
   TextInput,
   ScrollView,
+  FlatList,
   TouchableOpacity,
+  ViewToken,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -13,41 +15,183 @@ import { useWatchlist } from "@/hooks/useWatchlist";
 import { Movie } from "@/constants/data";
 import { MoviePoster } from "@/components/MoviePoster";
 import { GenreBadge } from "@/components/GenreBadge";
-import { MovieDetailModal } from "@/components/MovieDetailModal";
+import { SkeletonBox } from "@/components/SkeletonBox";
 import { LightColors, Typography, Spacing, Radius, Shadow } from "@/constants/theme";
 import { useTheme } from "@/context/ThemeContext";
+import { searchMovies, fullPosterUrl, isTmdbConfigured } from "@/services/tmdb";
 
+const MovieDetailModal = React.lazy(() =>
+  import("@/components/MovieDetailModal").then((m) => ({ default: m.MovieDetailModal }))
+);
+
+// Only what fits on screen is mounted; the rest streams in as you scroll
+const INITIAL_RENDER = 8;
+const BATCH_SIZE = 8;
+
+type Styles = ReturnType<typeof makeStyles>;
+
+// ── Result row ────────────────────────────────────────────────────────────────
+const SearchResultCard = React.memo(function SearchResultCard({
+  movie,
+  onPress,
+  colors,
+  styles,
+}: {
+  movie: Movie;
+  onPress: (movie: Movie) => void;
+  colors: typeof LightColors;
+  styles: Styles;
+}) {
+  return (
+    <TouchableOpacity
+      style={[
+        styles.card,
+        { backgroundColor: colors.surfaceElevated, borderColor: colors.border },
+        Shadow.sm,
+      ]}
+      onPress={() => onPress(movie)}
+      activeOpacity={0.85}
+    >
+      <MoviePoster movie={movie} width={62} height={88} dimmed={movie.watched} />
+
+      <View style={styles.cardBody}>
+        <Text
+          style={[
+            styles.cardTitle,
+            { color: movie.watched ? colors.textTertiary : colors.text },
+            movie.watched && { textDecorationLine: "line-through" },
+          ]}
+          numberOfLines={2}
+        >
+          {movie.title}
+        </Text>
+
+        <View style={styles.cardMeta}>
+          <GenreBadge category={movie.category} size="sm" />
+          {movie.watchOn ? (
+            <View style={[styles.platformBadge, { backgroundColor: colors.background }]}>
+              <Ionicons name="tv-outline" size={10} color={colors.textTertiary} />
+              <Text style={[styles.platformText, { color: colors.textTertiary }]}>
+                {movie.watchOn}
+              </Text>
+            </View>
+          ) : null}
+        </View>
+
+        {movie.notes ? (
+          <Text style={[styles.cardNotes, { color: colors.textSecondary }]} numberOfLines={1}>
+            {movie.notes}
+          </Text>
+        ) : null}
+
+        {(movie.subMovies?.length ?? 0) > 0 && (
+          <View style={styles.subRow}>
+            <Ionicons name="layers-outline" size={11} color={colors.primary} />
+            <Text style={[styles.subText, { color: colors.primary }]}>
+              {movie.subMovies!.filter((s) => s.watched).length}/{movie.subMovies!.length} parts
+            </Text>
+          </View>
+        )}
+      </View>
+
+      <View
+        style={[
+          styles.statusDot,
+          { backgroundColor: movie.watched ? colors.success : colors.border },
+        ]}
+      />
+    </TouchableOpacity>
+  );
+});
+
+// ── Shimmer placeholder ───────────────────────────────────────────────────────
+const SearchSkeleton = React.memo(function SearchSkeleton({ styles }: { styles: Styles }) {
+  return (
+    <View style={styles.skeletonWrap}>
+      {[0, 1, 2, 3, 4, 5].map((i) => (
+        <View key={i} style={styles.skeletonRow}>
+          <SkeletonBox width={62} height={88} borderRadius={Radius.md} />
+          <View style={styles.skeletonBody}>
+            <SkeletonBox width="75%" height={14} borderRadius={4} />
+            <SkeletonBox width="45%" height={11} borderRadius={4} />
+            <SkeletonBox width="60%" height={11} borderRadius={4} />
+          </View>
+        </View>
+      ))}
+    </View>
+  );
+});
+
+// ── Screen ────────────────────────────────────────────────────────────────────
 export default function SearchScreen() {
-  const { toWatch, watched, markWatched, removeMovie } = useWatchlist();
+  const { toWatch, watched, markWatched, removeMovie, loading, updateMoviePoster } =
+    useWatchlist();
   const { colors } = useTheme();
   const [query, setQuery] = useState("");
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [selectedMovie, setSelectedMovie] = useState<Movie | null>(null);
 
-  const allMovies = [...toWatch, ...watched];
-  const categories = Array.from(new Set(allMovies.map((m) => m.category))).filter(Boolean);
+  const styles = useMemo(() => makeStyles(colors), [colors]);
+
+  const allMovies = useMemo(() => [...toWatch, ...watched], [toWatch, watched]);
+  const categories = useMemo(
+    () => Array.from(new Set(allMovies.map((m) => m.category))).filter(Boolean),
+    [allMovies]
+  );
 
   const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
     return allMovies.filter((m) => {
       const matchQuery =
-        !query ||
-        m.title.toLowerCase().includes(query.toLowerCase()) ||
-        m.category.toLowerCase().includes(query.toLowerCase()) ||
-        (m.watchOn || "").toLowerCase().includes(query.toLowerCase());
+        !q ||
+        m.title.toLowerCase().includes(q) ||
+        m.category.toLowerCase().includes(q) ||
+        (m.watchOn || "").toLowerCase().includes(q);
       const matchCat = !selectedCategory || m.category === selectedCategory;
       return matchQuery && matchCat;
     });
-  }, [query, selectedCategory, toWatch, watched]);
+  }, [allMovies, query, selectedCategory]);
 
-  const styles = makeStyles(colors);
+  // Posters are fetched only for rows that actually scroll into view
+  const fetchedPosters = useRef(new Set<string>());
+  const viewabilityConfig = useRef({ itemVisiblePercentThreshold: 30 });
+
+  const onViewableItemsChanged = useCallback(
+    ({ viewableItems }: { viewableItems: ViewToken[] }) => {
+      if (!isTmdbConfigured()) return;
+      viewableItems.forEach(({ item }) => {
+        const movie = item as Movie;
+        if (movie.posterUrl || fetchedPosters.current.has(movie.id)) return;
+        fetchedPosters.current.add(movie.id);
+        searchMovies(movie.title).then((results) => {
+          if (results[0]?.poster_path) {
+            updateMoviePoster(movie.id, fullPosterUrl(results[0].poster_path));
+          }
+        });
+      });
+    },
+    [updateMoviePoster]
+  );
+
+  const renderItem = useCallback(
+    ({ item }: { item: Movie }) => (
+      <SearchResultCard movie={item} onPress={setSelectedMovie} colors={colors} styles={styles} />
+    ),
+    [colors, styles]
+  );
 
   return (
     <SafeAreaView style={styles.safe}>
       <View style={styles.container}>
-
+        {/* Header — kept outside the list so typing never remounts the input */}
         <View style={styles.header}>
           <Text style={[styles.title, { color: colors.text }]}>Search</Text>
-          <View style={[styles.searchBar, { borderColor: colors.border, backgroundColor: colors.surfaceElevated }]}>
+          <View
+            style={[
+              styles.searchBar,
+              { borderColor: colors.border, backgroundColor: colors.surfaceElevated },
+            ]}
+          >
             <Ionicons name="search-outline" size={18} color={colors.textTertiary} />
             <TextInput
               style={[styles.searchInput, { color: colors.text }]}
@@ -56,9 +200,13 @@ export default function SearchScreen() {
               value={query}
               onChangeText={setQuery}
               returnKeyType="search"
+              editable={!loading}
             />
             {query.length > 0 && (
-              <TouchableOpacity onPress={() => setQuery("")} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+              <TouchableOpacity
+                onPress={() => setQuery("")}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
                 <Ionicons name="close-circle" size={17} color={colors.textTertiary} />
               </TouchableOpacity>
             )}
@@ -79,7 +227,9 @@ export default function SearchScreen() {
                   <TouchableOpacity
                     key={cat}
                     onPress={() =>
-                      setSelectedCategory(cat === "All" ? null : (selectedCategory === cat ? null : cat))
+                      setSelectedCategory(
+                        cat === "All" ? null : selectedCategory === cat ? null : cat
+                      )
                     }
                     activeOpacity={0.75}
                     style={[
@@ -93,10 +243,7 @@ export default function SearchScreen() {
                       <Ionicons name="checkmark" size={12} color="#fff" style={{ marginRight: 2 }} />
                     )}
                     <Text
-                      style={[
-                        styles.chipText,
-                        { color: active ? "#fff" : colors.textSecondary },
-                      ]}
+                      style={[styles.chipText, { color: active ? "#fff" : colors.textSecondary }]}
                     >
                       {cat}
                     </Text>
@@ -108,7 +255,9 @@ export default function SearchScreen() {
         )}
 
         {/* ── Results ── */}
-        {allMovies.length === 0 ? (
+        {loading ? (
+          <SearchSkeleton styles={styles} />
+        ) : allMovies.length === 0 ? (
           <View style={styles.emptyState}>
             <Text style={styles.emptyEmoji}>🔍</Text>
             <Text style={[styles.emptyTitle, { color: colors.text }]}>No movies yet</Text>
@@ -117,17 +266,28 @@ export default function SearchScreen() {
             </Text>
           </View>
         ) : (
-          <ScrollView
+          <FlatList
+            data={filtered}
+            keyExtractor={(item) => item.id}
+            renderItem={renderItem}
             style={styles.results}
             contentContainerStyle={styles.resultsContent}
             showsVerticalScrollIndicator={false}
             keyboardShouldPersistTaps="handled"
-          >
-            <Text style={[styles.resultCount, { color: colors.textTertiary }]}>
-              {filtered.length} {filtered.length === 1 ? "result" : "results"}
-            </Text>
-
-            {filtered.length === 0 ? (
+            keyboardDismissMode="on-drag"
+            removeClippedSubviews
+            initialNumToRender={INITIAL_RENDER}
+            maxToRenderPerBatch={BATCH_SIZE}
+            updateCellsBatchingPeriod={50}
+            windowSize={5}
+            viewabilityConfig={viewabilityConfig.current}
+            onViewableItemsChanged={onViewableItemsChanged}
+            ListHeaderComponent={
+              <Text style={[styles.resultCount, { color: colors.textTertiary }]}>
+                {filtered.length} {filtered.length === 1 ? "result" : "results"}
+              </Text>
+            }
+            ListEmptyComponent={
               <View style={styles.emptyState}>
                 <Text style={styles.emptyEmoji}>😔</Text>
                 <Text style={[styles.emptyTitle, { color: colors.text }]}>No matches</Text>
@@ -135,78 +295,23 @@ export default function SearchScreen() {
                   Try a different search term
                 </Text>
               </View>
-            ) : (
-              filtered.map((movie) => (
-                <TouchableOpacity
-                  key={movie.id}
-                  style={[styles.card, { backgroundColor: colors.surfaceElevated, borderColor: colors.border }, Shadow.sm]}
-                  onPress={() => setSelectedMovie(movie)}
-                  activeOpacity={0.85}
-                >
-                  <MoviePoster movie={movie} width={62} height={88} dimmed={movie.watched} />
-
-                  <View style={styles.cardBody}>
-                    <Text
-                      style={[
-                        styles.cardTitle,
-                        { color: movie.watched ? colors.textTertiary : colors.text },
-                        movie.watched && { textDecorationLine: "line-through" },
-                      ]}
-                      numberOfLines={2}
-                    >
-                      {movie.title}
-                    </Text>
-
-                    <View style={styles.cardMeta}>
-                      <GenreBadge category={movie.category} size="sm" />
-                      {movie.watchOn ? (
-                        <View style={[styles.platformBadge, { backgroundColor: colors.background }]}>
-                          <Ionicons name="tv-outline" size={10} color={colors.textTertiary} />
-                          <Text style={[styles.platformText, { color: colors.textTertiary }]}>
-                            {movie.watchOn}
-                          </Text>
-                        </View>
-                      ) : null}
-                    </View>
-
-                    {movie.notes ? (
-                      <Text style={[styles.cardNotes, { color: colors.textSecondary }]} numberOfLines={1}>
-                        {movie.notes}
-                      </Text>
-                    ) : null}
-
-                    {(movie.subMovies?.length ?? 0) > 0 && (
-                      <View style={styles.subRow}>
-                        <Ionicons name="layers-outline" size={11} color={colors.primary} />
-                        <Text style={[styles.subText, { color: colors.primary }]}>
-                          {movie.subMovies!.filter((s) => s.watched).length}/{movie.subMovies!.length} parts
-                        </Text>
-                      </View>
-                    )}
-                  </View>
-
-                  {/* Status indicator */}
-                  <View
-                    style={[
-                      styles.statusDot,
-                      { backgroundColor: movie.watched ? colors.success : colors.border },
-                    ]}
-                  />
-                </TouchableOpacity>
-              ))
-            )}
-            <View style={{ height: 148 }} />
-          </ScrollView>
+            }
+            ListFooterComponent={<View style={{ height: 148 }} />}
+          />
         )}
       </View>
 
-      <MovieDetailModal
-        movie={selectedMovie}
-        visible={!!selectedMovie}
-        onClose={() => setSelectedMovie(null)}
-        onMarkWatched={markWatched}
-        onRemove={removeMovie}
-      />
+      {selectedMovie && (
+        <Suspense fallback={null}>
+          <MovieDetailModal
+            movie={selectedMovie}
+            visible
+            onClose={() => setSelectedMovie(null)}
+            onMarkWatched={markWatched}
+            onRemove={removeMovie}
+          />
+        </Suspense>
+      )}
     </SafeAreaView>
   );
 }
@@ -306,6 +411,20 @@ function makeStyles(colors: typeof LightColors) {
       borderRadius: 4,
       alignSelf: "center",
     },
+
+    // Shimmer
+    skeletonWrap: { paddingHorizontal: Spacing.base, gap: Spacing.sm, paddingTop: Spacing.xs },
+    skeletonRow: {
+      flexDirection: "row",
+      gap: Spacing.base,
+      alignItems: "center",
+      padding: Spacing.base,
+      borderRadius: Radius.lg,
+      borderWidth: 1,
+      borderColor: colors.border,
+      backgroundColor: colors.surfaceElevated,
+    },
+    skeletonBody: { flex: 1, gap: Spacing.sm },
 
     // Empty
     emptyState: {

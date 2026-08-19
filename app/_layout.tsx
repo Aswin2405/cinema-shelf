@@ -2,6 +2,7 @@ import React, { Suspense, useMemo, useEffect } from "react";
 import { Platform } from "react-native";
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
+import * as SplashScreen from "expo-splash-screen";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { WatchlistProvider, useWatchlist } from "@/hooks/useWatchlist";
@@ -10,11 +11,17 @@ import { ModalProvider, useModal } from "@/context/ModalContext";
 import { LockProvider, useLock } from "@/context/LockContext";
 import { LockScreen } from "@/components/LockScreen";
 import { DatabaseProvider } from "@/components/DatabaseProvider";
+import { AnimatedSplash } from "@/components/AnimatedSplash";
+import { ServerWakingNotice } from "@/components/ServerWakingNotice";
 import {
   getPrefs,
   scheduleDailyReminder,
   hasPermission,
 } from "@/services/notifications";
+
+// Hold the native splash until AnimatedSplash has painted the same artwork in
+// JS, so the handover between the two is seamless.
+SplashScreen.preventAutoHideAsync().catch(() => {});
 
 // Lazy-loaded: JS not parsed until the user taps "+"
 const AddMovieModal = React.lazy(() =>
@@ -60,7 +67,7 @@ function GlobalModals() {
 function AppContent() {
   const { isDark } = useTheme();
   const { isLocked } = useLock();
-  const { toWatch } = useWatchlist();
+  const { toWatch, wakingUp, loadFailed, retryLoad } = useWatchlist();
 
   // On startup: re-schedule the daily reminder with the current queue count
   // (only on native — web doesn't support push notifications)
@@ -86,6 +93,10 @@ function AppContent() {
         <Stack.Screen name="(tabs)" />
       </Stack>
       <GlobalModals />
+      {/* Sits over whichever tab's shimmer is showing */}
+      {(wakingUp || loadFailed) && (
+        <ServerWakingNotice failed={loadFailed} onRetry={retryLoad} />
+      )}
       {isLocked && <LockScreen />}
     </>
   );
@@ -107,6 +118,8 @@ export default function RootLayout() {
         </ThemeProvider>
       </DatabaseProvider>
       </SafeAreaProvider>
+      {/* Last child, and full-bleed: covers the app while it boots */}
+      <AnimatedSplash />
     </GestureHandlerRootView>
   );
 }

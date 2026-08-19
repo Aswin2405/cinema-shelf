@@ -16,6 +16,7 @@ import { LinearGradient } from "expo-linear-gradient";
 import { useWatchlist } from "@/hooks/useWatchlist";
 import { LightColors, Typography, Spacing, Radius, Shadow } from "@/constants/theme";
 import { GenreBadge } from "@/components/GenreBadge";
+import { SkeletonBox } from "@/components/SkeletonBox";
 import { useTheme } from "@/context/ThemeContext";
 import { useLock } from "@/context/LockContext";
 import {
@@ -72,7 +73,7 @@ const REMINDER_TIMES = [
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function ProfileScreen() {
-  const { toWatch, watched } = useWatchlist();
+  const { toWatch, watched, loading } = useWatchlist();
   const { colors, isDark, toggleTheme } = useTheme();
   const { lockApp } = useLock();
 
@@ -175,7 +176,11 @@ export default function ProfileScreen() {
           ].map((s, i, arr) => (
             <React.Fragment key={s.label}>
               <View style={styles.statItem}>
-                <Text style={styles.statValue}>{s.value}</Text>
+                {loading ? (
+                  <SkeletonBox width={28} height={20} borderRadius={4} />
+                ) : (
+                  <Text style={styles.statValue}>{s.value}</Text>
+                )}
                 <Text style={styles.statLabel}>{s.label}</Text>
               </View>
               {i < arr.length - 1 && <View style={styles.divider} />}
