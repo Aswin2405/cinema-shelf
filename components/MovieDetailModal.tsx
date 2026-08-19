@@ -18,6 +18,7 @@ import { getCategoryPosterColor } from "@/constants/categoryColors";
 import { Typography, Spacing, Radius, Shadow } from "@/constants/theme";
 import { useTheme } from "@/context/ThemeContext";
 import { useWatchlist } from "@/hooks/useWatchlist";
+import { PosterPicker, usePosterSearch } from "./PosterPicker";
 
 interface MovieDetailModalProps {
   movie: Movie | null;
@@ -57,6 +58,8 @@ export function MovieDetailModal({
   const [editCategory, setEditCategory] = useState("");
   const [editWatchOn, setEditWatchOn] = useState("");
   const [editLanguage, setEditLanguage] = useState("");
+  // Pending poster choice; null means "no poster", mirroring Movie.posterUrl
+  const [editPosterUrl, setEditPosterUrl] = useState<string | null>(null);
 
   // ── Notes edit state ─────────────────────────────────────────────────────
   const [isEditingNotes, setIsEditingNotes] = useState(false);
@@ -69,6 +72,9 @@ export function MovieDetailModal({
   const [renamingSubId, setRenamingSubId] = useState<string | null>(null);
   const [renameText, setRenameText] = useState("");
 
+  // Only searches while the meta editor is open
+  const { results: posterResults, isSearching } = usePosterSearch(editTitle, isEditingMeta);
+
   useEffect(() => {
     if (visible && liveMovie) {
       setEditTitle(liveMovie.title);
@@ -76,6 +82,7 @@ export function MovieDetailModal({
       setEditWatchOn(liveMovie.watchOn || "");
       setEditLanguage(liveMovie.language || "");
       setEditNotes(liveMovie.notes || "");
+      setEditPosterUrl(liveMovie.posterUrl ?? null);
       setIsEditingMeta(false);
       setIsEditingNotes(false);
       setShowAddPart(false);
@@ -90,7 +97,25 @@ export function MovieDetailModal({
   const subMovies = liveMovie.subMovies || [];
   const watchedParts = subMovies.filter((s) => s.watched).length;
 
+  const currentPosterUrl = liveMovie.posterUrl ?? null;
+  const posterChanged = editPosterUrl !== currentPosterUrl;
+  // While editing, the hero previews the pending poster
+  const heroMovie = isEditingMeta
+    ? { ...liveMovie, posterUrl: editPosterUrl ?? undefined }
+    : liveMovie;
+
   // ── Handlers ─────────────────────────────────────────────────────────────
+  const handleStartEditMeta = () => {
+    // Re-seed from the live movie — the poster may have been backfilled from
+    // TMDB since the modal opened.
+    setEditTitle(liveMovie.title);
+    setEditCategory(liveMovie.category);
+    setEditWatchOn(liveMovie.watchOn || "");
+    setEditLanguage(liveMovie.language || "");
+    setEditPosterUrl(currentPosterUrl);
+    setIsEditingMeta(true);
+  };
+
   const handleSaveMeta = () => {
     const t = editTitle.trim();
     const c = editCategory.trim();
@@ -100,6 +125,9 @@ export function MovieDetailModal({
       category: c || liveMovie.category,
       watchOn: editWatchOn.trim(),
       language: editLanguage.trim() || undefined,
+      // Only sent when actually changed, so saving other fields never touches
+      // a poster the user did not pick.
+      ...(posterChanged && editPosterUrl ? { posterUrl: editPosterUrl } : {}),
     });
     setIsEditingMeta(false);
   };
@@ -171,17 +199,21 @@ export function MovieDetailModal({
                 <Text style={styles.heroSaveTxt}>Save</Text>
               </TouchableOpacity>
             ) : (
-              <TouchableOpacity
-                style={styles.heroIconBtn}
-                onPress={() => setIsEditingMeta(true)}
-              >
+              <TouchableOpacity style={styles.heroIconBtn} onPress={handleStartEditMeta}>
                 <Ionicons name="pencil-outline" size={18} color="#fff" />
               </TouchableOpacity>
             )}
           </View>
 
           <View style={styles.heroContent}>
-            <MoviePoster movie={liveMovie} width={100} height={140} />
+            <View>
+              <MoviePoster movie={heroMovie} width={100} height={140} />
+              {isEditingMeta && (
+                <View style={styles.posterEditBadge}>
+                  <Ionicons name="image-outline" size={12} color="#fff" />
+                </View>
+              )}
+            </View>
             <View style={styles.heroText}>
               {isEditingMeta ? (
                 <>
@@ -265,6 +297,21 @@ export function MovieDetailModal({
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
         >
+          {/* ── Poster (edit mode only) ── */}
+          {isEditingMeta && (
+            <PosterPicker
+              isSearching={isSearching}
+              results={posterResults}
+              selectedUrl={editPosterUrl}
+              // Undoing a pick returns to the poster the movie already has
+              onSelect={(url) => setEditPosterUrl(url ?? currentPosterUrl)}
+              titleEntered={editTitle.trim().length >= 2}
+              label={posterChanged ? "New poster — Save to apply" : "Change poster"}
+              clearLabel="Undo"
+              canClear={posterChanged}
+            />
+          )}
+
           {/* ── Notes ── */}
           <View style={styles.section}>
             <View style={styles.sectionRow}>
@@ -557,6 +604,19 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     gap: Spacing.lg,
     alignItems: "flex-end",
+  },
+  posterEditBadge: {
+    position: "absolute",
+    bottom: -6,
+    right: -6,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: "rgba(0,0,0,0.75)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.45)",
+    alignItems: "center",
+    justifyContent: "center",
   },
   heroText: { flex: 1, gap: Spacing.sm },
   heroTitle: {

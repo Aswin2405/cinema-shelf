@@ -1,8 +1,14 @@
 import { Movie, SubMovie } from "@/constants/data";
 
-// Change this to your machine's IP when testing on a physical device
-// e.g. 'http://192.168.1.x:3001'
-export const API_BASE_URL = "http://localhost:3001";
+// Deployed backend. To run against a local server instead, set
+// EXPO_PUBLIC_API_URL in frontend/.env (see .env.example) and restart the dev
+// server — Expo inlines EXPO_PUBLIC_* vars at build time, so it is not picked
+// up by a fast refresh.
+const DEFAULT_API_URL = "https://cinema-shelf-backend.onrender.com";
+
+export const API_BASE_URL = (
+  process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL
+).replace(/\/+$/, "");
 
 export interface ApiPrefs {
   enabled: boolean;

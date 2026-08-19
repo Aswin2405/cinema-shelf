@@ -7,8 +7,6 @@ import {
   TouchableOpacity,
   TextInput,
   ScrollView,
-  Image,
-  ActivityIndicator,
   KeyboardAvoidingView,
   Platform,
 } from "react-native";
@@ -19,13 +17,7 @@ import { Movie } from "@/constants/data";
 import { getCategoryPosterColor } from "@/constants/categoryColors";
 import { LightColors, Typography, Spacing, Radius, Shadow } from "@/constants/theme";
 import { useTheme } from "@/context/ThemeContext";
-import {
-  searchMovies,
-  fullPosterUrl,
-  thumbPosterUrl,
-  isTmdbConfigured,
-  TmdbResult,
-} from "@/services/tmdb";
+import { PosterPicker, usePosterSearch } from "./PosterPicker";
 
 interface AddMovieModalProps {
   visible: boolean;
@@ -54,10 +46,10 @@ export function AddMovieModal({
   const [notes, setNotes] = useState("");
   const [dupTitle, setDupTitle] = useState<string | null>(null);
 
-  // TMDB poster search state
-  const [posterResults, setPosterResults] = useState<TmdbResult[]>([]);
   const [selectedPosterUrl, setSelectedPosterUrl] = useState<string | null>(null);
-  const [isSearching, setIsSearching] = useState(false);
+
+  // Debounced TMDB search, driven by whatever title has been typed so far
+  const { results: posterResults, isSearching } = usePosterSearch(title);
 
   useEffect(() => {
     if (!dupTitle) return;
@@ -71,31 +63,11 @@ export function AddMovieModal({
     setWatchOn("");
     setLanguage("");
     setNotes("");
-    setPosterResults([]);
     setSelectedPosterUrl(null);
-    setIsSearching(false);
     setDupTitle(null);
   }, []);
 
   const handleClose = () => { reset(); onClose(); };
-
-  // Debounced TMDB search whenever the title changes
-  useEffect(() => {
-    const q = title.trim();
-    if (q.length < 2 || !isTmdbConfigured()) {
-      setPosterResults([]);
-      setIsSearching(false);
-      return;
-    }
-    setIsSearching(true);
-    const timer = setTimeout(async () => {
-      const results = await searchMovies(q);
-      // console.log(results,"resulrts")
-      setPosterResults(results.slice(0, 10)); // cap at 10 results
-      setIsSearching(false);
-    }, 600);
-    return () => clearTimeout(timer);
-  }, [title]);
 
   const handleAdd = () => {
     const trimmedTitle = title.trim();
@@ -202,8 +174,6 @@ export function AddMovieModal({
             selectedUrl={selectedPosterUrl}
             onSelect={setSelectedPosterUrl}
             titleEntered={title.trim().length >= 2}
-            colors={colors}
-            styles={styles}
           />
 
           {/* ── Category ── */}
@@ -264,84 +234,6 @@ export function AddMovieModal({
       </KeyboardAvoidingView>
       </SafeAreaView>
     </Modal>
-  );
-}
-
-// ── Poster picker sub-component ───────────────────────────────────────────────
-
-function PosterPicker({
-  isSearching,
-  results,
-  selectedUrl,
-  onSelect,
-  titleEntered,
-  colors,
-  styles,
-}: {
-  isSearching: boolean;
-  results: TmdbResult[];
-  selectedUrl: string | null;
-  onSelect: (url: string | null) => void;
-  titleEntered: boolean;
-  colors: typeof LightColors;
-  styles: ReturnType<typeof makeStyles>;
-}) {
-  if (!isTmdbConfigured()) return null;
-  if (!titleEntered) return null;
-
-  return (
-    <View style={styles.pickerSection}>
-      <View style={styles.pickerHeader}>
-        <Ionicons name="image-outline" size={14} color={colors.primary} />
-        <Text style={[styles.pickerLabel, { color: colors.textSecondary }]}>
-          {selectedUrl ? "Poster selected" : "Choose a poster"}
-        </Text>
-        {selectedUrl && (
-          <TouchableOpacity onPress={() => onSelect(null)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-            <Text style={[styles.pickerClear, { color: colors.textTertiary }]}>Clear</Text>
-          </TouchableOpacity>
-        )}
-      </View>
-
-      {isSearching ? (
-        <View style={styles.pickerLoading}>
-          <ActivityIndicator size="small" color={colors.primary} />
-          <Text style={[styles.pickerHint, { color: colors.textTertiary }]}>Searching TMDB…</Text>
-        </View>
-      ) : results.length === 0 ? (
-        <Text style={[styles.pickerHint, { color: colors.textTertiary }]}>No posters found</Text>
-      ) : (
-        <ScrollView horizontal showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.pickerScroll}>
-          {results.map((r) => {
-            const full = fullPosterUrl(r.poster_path!);
-            const thumb = thumbPosterUrl(r.poster_path!);
-            const isSelected = selectedUrl === full;
-            return (
-              <TouchableOpacity
-                key={r.id}
-                onPress={() => onSelect(isSelected ? null : full)}
-                style={[
-                  styles.thumbWrap,
-                  isSelected && { borderColor: colors.primary, borderWidth: 2.5 },
-                ]}
-                activeOpacity={0.8}
-              >
-                <Image source={{ uri: thumb }} style={styles.thumb} resizeMode="cover" />
-                {isSelected && (
-                  <View style={styles.thumbCheck}>
-                    <Ionicons name="checkmark-circle" size={20} color={colors.primary} />
-                  </View>
-                )}
-                <Text style={[styles.thumbYear, { color: colors.textTertiary }]} numberOfLines={1}>
-                  {r.release_date?.slice(0, 4) ?? ""}
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
-        </ScrollView>
-      )}
-    </View>
   );
 }
 
@@ -452,38 +344,5 @@ function makeStyles(colors: typeof LightColors) {
       ...Shadow.sm,
     },
     notesInput: { minHeight: 100, paddingTop: Spacing.md },
-
-    // Poster picker
-    pickerSection: {
-      marginTop: Spacing.sm,
-      backgroundColor: colors.surfaceElevated,
-      borderRadius: Radius.lg,
-      padding: Spacing.sm,
-      borderWidth: 1,
-      borderColor: colors.border,
-      gap: Spacing.xs,
-    },
-    pickerHeader: { flexDirection: "row", alignItems: "center", gap: 5 },
-    pickerLabel: { fontSize: Typography.size.sm, fontWeight: "600", flex: 1 },
-    pickerClear: { fontSize: Typography.size.sm, fontWeight: "600" },
-    pickerLoading: { flexDirection: "row", alignItems: "center", gap: Spacing.sm, paddingVertical: Spacing.sm },
-    pickerHint: { fontSize: Typography.size.sm, paddingVertical: Spacing.xs },
-    pickerScroll: { gap: Spacing.sm, paddingVertical: Spacing.xs },
-    thumbWrap: {
-      width: 70,
-      borderRadius: Radius.md,
-      overflow: "hidden",
-      borderWidth: 0,
-      borderColor: "transparent",
-    },
-    thumb: { width: 70, height: 100, borderRadius: Radius.md },
-    thumbCheck: {
-      position: "absolute",
-      top: 4,
-      right: 4,
-      backgroundColor: "#fff",
-      borderRadius: 10,
-    },
-    thumbYear: { fontSize: 10, fontWeight: "600", textAlign: "center", marginTop: 3 },
   });
 }

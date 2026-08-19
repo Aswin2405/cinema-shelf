@@ -33,7 +33,9 @@ interface WatchlistContextType {
   isInWatchlist: (id: string) => boolean;
   updateMovie: (
     id: string,
-    updates: Partial<Pick<Movie, "title" | "category" | "notes" | "watchOn" | "language">>
+    updates: Partial<
+      Pick<Movie, "title" | "category" | "notes" | "watchOn" | "language" | "posterUrl">
+    >
   ) => void;
   addSubMovie: (movieId: string, sub: SubMovie) => void;
   removeSubMovie: (movieId: string, subId: string) => void;
@@ -159,7 +161,9 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
   const updateMovie = useCallback(
     (
       id: string,
-      updates: Partial<Pick<Movie, "title" | "category" | "notes" | "watchOn" | "language">>
+      updates: Partial<
+        Pick<Movie, "title" | "category" | "notes" | "watchOn" | "language" | "posterUrl">
+      >
     ) => {
       // Compute posterColor eagerly so both state and API receive the same value
       const patchData: Partial<Movie> = { ...updates };
